@@ -1,0 +1,408 @@
+---
+title: "Muni Risk Forecasts"
+author: "Red Tortoise, LLC"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+classoption: landscape
+---
+
+Run Date: `r Sys.Date()`    
+```{r setup, include=FALSE, warning=FALSE,echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, comment = "")
+library(PerformanceAnalytics)
+library(quantmod)
+library(dygraphs)
+library(timeDate)
+library(lubridate)
+library(readxl)
+library(knitr)
+library(fundAnalysis)
+library(xml2)
+library(rvest)
+library(ggplot2)
+library(openxlsx)
+library(yaml)
+library(dplyr)
+source("VWIUX_functions.r")
+source("Read_RAFI_Utilities.r")
+```
+
+```{r userdata, echo=FALSE}
+tickersToBlend <- c("VWIUX", "VMLUX")
+wtsToBlend <- c(0.5, 0.5)
+muniDesc <- paste0(wtsToBlend * 100, "%", tickersToBlend, collapse = ' + ')
+fund_ticker <- "VWIUX"
+fund_name <- paste0(wtsToBlend * 100, "%", tickersToBlend, collapse = ' + ')
+rafi.data.loc <- paste0(Sys.getenv("RT_PATH"), "Research/R/Development/Muni/")
+xls.file <- "Asset-Allocation-Interactive-Data.xlsx"
+
+```
+
+```{r initialize, include=FALSE, warning=FALSE, echo=FALSE, message=FALSE}
+colNamesMap <- readxl::read_excel("NamesMap.xlsx", sheet = "mapColNames")
+classNamesMap  <- readxl::read_excel("NamesMap.xlsx", sheet = "mapClassNames")
+lookup <- read_xlsx("FundsRepresentingSegments.xlsx")
+erSheetNames <- c("Expected.Returns", "Expected Returns") # sheet names containing returns
+riskSheetNames <- c("Expected.Risk.Matrix", "Expected Correlations") # sheet names containing corr and cov matrices
+fnRAFI <- paste0(rafi.data.loc, xls.file)
+rafi <- rafi.read.xls.v4(fnRAFI, erSheetNames, riskSheetNames)
+rafi <- massageRafi(rafi = rafi, colNamesMap = colNamesMap, classNamesMap = classNamesMap)
+rafibk <- rafi
+# Should Asset Class be renames Segment?
+if (nrow(rafi$corr)  != (ncol(rafi$corr) - 1)) {
+  stop("Correlation matrix not square.")
+}
+if (nrow(rafi$cov) != (ncol(rafi$cov) - 1)) {
+  stop("Correlation matrix not square.")
+}
+if (nrow(rafi$corr) != nrow(rafi$cov)) {
+  stop("Correlation and Covariance matrices sizes differ. ")
+}
+if (nrow(rafi$ret) != nrow(rafi$corr)) {
+  stop("Return and Risk matrices have different asset classes after filtering.")
+}
+
+
+# lookup[is.na(lookup$Ticker), "Ticker"] <- "NA"
+# for (i in 1:nrow(lookup)) {
+#     ticker <- lookup$Ticker[i]
+#     if (ticker != "NA") {
+#         temp <- NULL
+#         attempt <- 0
+#         while (is.null(temp) && attempt <= 5) {
+#             attempt <- attempt + 1
+#             try(
+#                 temp <- scrapeQuoteSummary(ticker)
+#             )
+#         }
+#         if (is.null(temp)) {
+#             warning(paste("ScrapeQuoteSummary failed for",ticker))
+#         } else {
+#             lookup$Name[i] <- temp['Fund Name']    
+#         }
+#     }
+# }
+
+freq <- "W"
+retToBlend <- GetReturns(tickersToBlend, freq)
+retMuni <- PerformanceAnalytics::Return.portfolio(retToBlend, wtsToBlend)
+if (min(apply(retMuni, 2, nna)) < 52 * 3) warning("There are less than 52*3 weeks of returns for the blend of muni funds")
+
+tickers <- lookup$Ticker[match(c(colnames(rafi$corr)[-1], "Munis"), lookup$RAFI_Class)]
+ret <- GetReturns(tickers, freq)
+min_weeks <- min(apply(ret,2,nna))
+if (min_weeks < 52 * 3) warning("There are less than 52*3 weeks of returns for one or more symbols")
+first_row <- max(nrow(ret) - 52 * 3 - 3, nrow(ret) - min_weeks + 1)
+ret <- ret[first_row:nrow(ret),]
+ret <- merge.xts(ret, retMuni, join = "left")
+ret$VWIUX <- NULL
+colnames(ret) <- c(colnames(ret)[1:(ncol(ret) - 1)], "Muni")
+
+vol <- round(apply(data.frame(ret), 2, sd,na.rm = TRUE)*sqrt(52) * 100, 2)
+
+out <- data.frame("Asset.Class" = c(colnames(rafi$corr)[-1], "Munis")) %>% filter(Asset.Class != "Segment")
+# out[nrow(out),"Asset.Class"] <- "Munis" # muni name
+out$RAFI_Agg_Cor <- NA
+out$Hist_Agg_Cor <- NA
+out$Hist_Muni_Cor <- NA
+idx <- match(c(colnames(rafi$corr)[-1], "Munis"), lookup$RAFI_Class)
+out$Ticker <- lookup$Ticker[idx]
+out$FundName <- lookup$Name[idx]
+idx <- match(colnames(rafi$corr)[-1], rafi$ret$`Asset Class`)
+out$RAFI_Vol <- c(rafi$ret$Volatility[idx], NA)
+out$Hist_Vol <- NA
+idx <- which(out$Asset.Class == "Munis")
+out[idx, "Ticker"] <- "Muni"
+fund_ticker <- "Muni"
+out[idx, "FundName"] <- muniDesc
+
+
+for (i in 1:(nrow(out) - 1)) {
+    out$RAFI_Agg_Cor[i] <- as.numeric(rafi$corr["US Aggregate", out$Asset.Class[i]])
+    if (out$Ticker[i] != "NA") {
+        out$Hist_Agg_Cor[i] <- cor(ret[,"AGG"], ret[,out$Ticker[i]])
+        out$Hist_Muni_Cor[i] <- cor(ret[,fund_ticker], ret[,out$Ticker[i]])
+        out$Hist_Vol[i] <- sd(ret[,out$Ticker[i]])*sqrt(52)
+    }
+}
+out[match("Munis", out$Asset.Class),"Hist_Agg_Cor"]  <- cor(ret[,"AGG"], ret[,fund_ticker])
+out[match("Munis", out$Asset.Class),"Hist_Muni_Cor"] <- cor(ret[,fund_ticker], ret[,fund_ticker])
+out[match("Munis", out$Asset.Class),"Hist_Vol"] <- sd(ret$Muni, na.rm = TRUE)*sqrt(52)
+    
+#MuniVAgg.lm  <- lm(Hist_Muni_Cor ~ Hist_Agg_Cor, data=out, subset=out$Asset.Class!="Munis")
+#AggVRAFI.lm  <- lm(Hist_Agg_Cor ~ RAFI_Agg_Cor, data=out, subset=out$Asset.Class!="US Aggregate")
+RAFIVVol.lm <- lm(RAFI_Vol ~ Hist_Vol, data = out %>% filter(!is.na(Hist_Vol) & !is.na(RAFI_Vol)))
+```
+
+```{r createcompare, echo=FALSE}
+nr <- nrow(rafi$corr)*(nrow(rafi$corr) - 1) / 2
+cor.compare <- data.frame(RAFI = numeric(nr),
+                          Hist = numeric(nr),
+                          rowClass = character(nr),
+                          colClass = character(nr),
+                          rowTicker = character(nr),
+                          colTicker = character(nr))
+
+k <- 1
+for (i in 2:nrow(rafi$corr)) {
+    for (j in 1:(i - 1)) {
+        # row.class <- rafi$corr$Segment[i]
+        row.class <- rafi$corr$`Asset Class`[i]
+        col.class <- colnames(rafi$corr)[j + 1]
+        row.ticker <- out[out$Asset.Class == row.class, "Ticker"]
+        col.ticker <- out[out$Asset.Class == col.class, "Ticker"]
+        if (length(row.ticker > 0 & length(col.ticker > 0))) {
+            if (row.ticker != "NA" & col.ticker != "NA") {
+                cor.compare[k,"rowClass"] <- row.class
+                cor.compare[k,"colClass"] <- col.class
+                cor.compare[k,"rowTicker"] <- row.ticker
+                cor.compare[k,"colTicker"] <- col.ticker
+                cor.compare[k,"Hist"] <- cor(ret[,row.ticker],ret[,col.ticker])
+                cor.compare[k,"RAFI"] <- rafi$corr[i, j + 1]
+                k <- k + 1
+            }    
+        }
+    }
+}
+```
+
+## Assumptions for Muni Bonds    
+The purpose here is to develop correlation and volatility assumptions for municipal bonds as represented by the `r fund_name`. RAFI does not provide assumptions for municipal bonds. 
+
+To help develop the assumptions we use roughly 3 years of weekly returns for a number of funds which serve as proxies for the asset classes. There are "NA" values for asset classes in which we have no interest.
+
+## Funds  
+The following funds are used as proxies for the asset classes
+
+```{r Funds, echo=FALSE, comment="", size="small"}
+kable(out[!is.na(out$Ticker),c("Asset.Class","FundName","Ticker")], caption = "Proxies")
+```
+
+## Volatility   
+We start by comparing RAFI's forecast 10 year volatility for the asset classes with the shorter term historical volatility for the funds.
+
+```{r VolInfo, echo=FALSE, comment=""}
+
+x100andRound <- function(x){
+  return(round(x * 100, 1))
+}
+temp <- cbind(out[!is.na(out$Ticker), 
+                c("Asset.Class","RAFI_Vol","Hist_Vol")], 
+            out$RAFI_Vol[!is.na(out$Ticker)] - out$Hist_Vol[!is.na(out$Ticker)]) %>%
+  mutate(across(c(2,3,4), x100andRound)) %>%
+  arrange(desc(Hist_Vol))
+kable(temp,  
+      caption = "Volatility", digits = 3, col.names = c("Asset Class","RAFI Forecast","Hist.","Diff"))
+```
+
+Next we construct a regression showing the relationship between historical and RAFI's forecast volatility.  We use this relationship to develop a risk assumption for Muni bonds.      
+```{r plotvol}
+muni_vol_pred <- predict(RAFIVVol.lm, 
+                         newdata = data.frame(Hist_Vol = out[out$Asset.Class == "Munis","Hist_Vol"]))
+#ggplot(out, aes(x=Hist_Vol, y=RAFI_Vol)) + geom_point(color="blue")
+fit <- RAFIVVol.lm
+# ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) +
+ ggplot(fit$model, aes(x = fit$model[[2]], y = fit$model[[1]])) + 
+  geom_point() + 
+  geom_abline(intercept = 0, slope = 1, color = "gray") +
+  stat_smooth(method = "lm", col = "red") +
+  geom_point(aes(x = out[out$Asset.Class == "Munis","Hist_Vol"], y = muni_vol_pred), color = "green", pch = 15) +
+  labs(title = "RAFI Forecast v. Historical Volatility", 
+       subtitle = paste("Adj R2 = ",round(summary(fit)$adj.r.squared, 3),
+                     "Intercept =",round(fit$coef[[1]],3 ),
+                     " Slope =",round(fit$coef[[2]], 3),
+                     " P =",round(summary(fit)$coef[2,4], 5)),
+       x = "Historical Volatility", y = "RAFI Forecast Volatility")
+
+```
+
+**The predicted volatility for munis, as represented by the green square above, is `r round(muni_vol_pred,3)` given its historical volatility of `r round(out[out$Asset.Class == "Munis","Hist_Vol"],3)`.**    
+```{r summaryvollm}
+summary(RAFIVVol.lm)
+```
+-----
+
+## Correlation Analysis    
+In the next charts we look at the relationship between the RAFI forecast correlations and the historical correlations.  We consider the correlations with the US Aggregate, US Treasury Long, US Treasury Intermediate, and US Corporate Intermediate asset classes distinctly from the others.    
+
+```{r corranalysis, echo=FALSE, fig.width=4.5}
+cor.compare.lm <- lm(RAFI ~ Hist, data = cor.compare %>% filter(RAFI !=0 & Hist !=0))
+pred <- predict(cor.compare.lm,newdata = data.frame(Hist = out$Hist_Muni_Cor))
+names(pred) <- out$Asset.Class
+
+fi.idx <- (cor.compare$rowClass %in% 
+    c("US Aggregate", "US Treasury Long", "US Treasury Intermediate", "US Corporate Intermediate")) |
+    (cor.compare$colClass %in% 
+    c("US Aggregate", "US Treasury Long", "US Treasury Intermediate", "US Corporate Intermediate"))
+
+cor.fi.lm <- lm(RAFI ~ Hist, dat = cor.compare[fi.idx, ])
+cor.fi.pred <- predict(cor.fi.lm, newdata = data.frame(Hist = out$Hist_Muni_Cor))
+names(cor.fi.pred) <- out$Asset.Class
+
+ggplotRegression(cor.compare.lm, title="All correlations", xlab = "Historical Correlation")
+ggplotRegression(cor.fi.lm, title="Fixed Income Correlations", xlab = "Historical Correlation")
+
+```
+
+Summaries of the two regressions:
+
+```{r corregresssummaries, echo=FALSE}
+summary(cor.compare.lm)
+summary(cor.fi.lm)
+```
+
+There seems to be a similar relationship between the historical fixed income related correlations and the RAFI forecast.  Since Munis are a fixed income class, we will use the regression shown in the Fixed Income Correlations.
+
+
+Historical and predicted correlations with munis:    
+```{r histandpredcor}
+cor.fi.pred["Munis"] <- 1  # we know correlation of muni,muni will be 1.
+pred["Munis"] <- 1
+# Use correlations for Agg where there are NAs with muni
+idx <- is.na(cor.fi.pred)
+cor.fi.pred[idx] <- out$RAFI_Agg_Cor[idx]
+idx <- is.na(pred)
+pred[idx] <- out$RAFI_Agg_Cor[idx]
+cor_hist_pred <- data.frame(cbind(Hist = out$Hist_Muni_Cor, PredFI = cor.fi.pred, PredAll = pred))
+rownames(cor_hist_pred) <- out$Asset.Class
+kable(cor_hist_pred, digits = 3, caption = "Historical v Predicted Correlations with Munis")
+```
+
+```{r calcmunicov, echo=FALSE}
+temp <- out$RAFI_Vol
+temp[which(out$Asset.Class == "Munis")] <- muni_vol_pred
+cov.fi.pred <- cor.fi.pred * muni_vol_pred * temp
+```
+
+```{r buildXLObject}
+idx <- match(colnames(rafi$corr)[-1], rafi$ret$`Asset Class`)
+out.ret <- rafi$ret[idx,]
+out.ret[nrow(out.ret) + 1,] <- NA
+out.ret[nrow(out.ret), "Asset Class"] <- "Munis"
+out.ret[nrow(out.ret), "Volatility"] <- muni_vol_pred
+
+#out.cor <- rafi$corr %>% mutate(Munis = 0) %>% add_row(Segment = "Munis")
+out.cor <- rafi$corr %>% mutate(Munis = 0) %>% add_row(`Asset Class` = "Munis")
+out.cor[nrow(out.cor), 2:ncol(out.cor)] <- t(as.numeric(cor.fi.pred  %>% replace(is.na(.), 0)))
+out.cor[, "Munis"] <- as.numeric(cor.fi.pred  %>% replace(is.na(.), 0))
+
+
+out.cov <- rafi$cov %>% mutate(Munis = 0) %>% add_row(`Asset Class` = "Munis")
+out.cov[nrow(out.cov), 2:ncol(out.cov)] <- t(as.numeric(cov.fi.pred  %>% replace(is.na(.), 0)))
+out.cov[, "Munis"] <- as.numeric(cov.fi.pred  %>% replace(is.na(.), 0))
+```
+
+```{r clean_out_ret}
+# remove Excess Return vs Cash column
+names(out.ret) <- stringr::str_replace_all(names(out.ret), "[\r\n]", " ")
+if ("Excess Return  vs Cash" %in% names(out.ret)){
+  out.ret <- out.ret[, -which(names(out.ret) == "Excess Return  vs Cash")]
+}
+fixColumnNames <- function(columnNames){
+  newNames <- c("Expected Return (Nominal)",
+                "Expected Return (Real)",
+                "Average Net Yield", "Capital Growth", "Capital Growth")
+  keyWords <- c("Nominal", "Real", "Yield", "Growth", "Capital Growth")
+  
+  out <- columnNames
+  for(i in 1:length(columnNames)) {
+    for(j in 1:length(keyWords)){
+      if (grepl(keyWords[j], columnNames[i], fixed = TRUE)) {out[i] <- newNames[j]}
+    }
+  }
+  return(out)
+}
+
+names(out.ret) <- fixColumnNames(names(out.ret))
+```
+
+```{r formulasForMunis}
+muniRow <- which(out.ret$`Asset Class` == "Munis")
+usaggRow <- which(out.ret$`Asset Class` == "US Aggregate")
+growthCol <- which(grepl("Growth", names(out.ret), fixed = TRUE)) # which(names(out.ret) == "Growth")
+yieldCol <- which(grepl("Yield", names(out.ret), fixed = TRUE)) # which(names(out.ret) == "Yield")
+valuationChangeCol <-  which(grepl("Valuation", names(out.ret), fixed = TRUE))
+realReturnCol <-  which(grepl("Real", names(out.ret), fixed = TRUE))
+nominalReturnCol <- which(grepl("Nominal", names(out.ret), fixed = TRUE))
+out.ret[muniRow, growthCol] <- out.ret[usaggRow, growthCol]
+out.ret[muniRow, valuationChangeCol] <- out.ret[usaggRow, valuationChangeCol]
+```
+
+
+```{r}
+
+
+rafidate <- sub(", " , ", 1, ",rafi$as_of_date)
+fn <- paste0("RAFI ", 
+             format(as.Date(rafidate, "%B,%d,%Y"), format = "%Y%m"), 
+             " w Muni.xlsx")
+xlranges <- getxlranges()
+cor.rng.index <- excel.link::xl.address2index(xlranges$rng.corr)
+cov.rng.index <- excel.link::xl.address2index(xlranges$rng.cov)
+ret.rng.index <- excel.link::xl.address2index(xlranges$rng.return)
+date.rng.index <- excel.link::xl.address2index(xlranges$rng.date)
+options("openxlsx.numFmt" = "0.0%")
+wb <- openxlsx::createWorkbook()
+openxlsx::addWorksheet(wb, "Expected.Returns")
+openxlsx::writeDataTable(wb,
+          sheet = "Expected.Returns",
+          x = out.ret,
+          startCol = ret.rng.index["left"],
+          startRow = ret.rng.index["top"],
+          colNames = TRUE,
+          rowNames = FALSE,
+          withFilter = FALSE)
+# muni expected return real
+openxlsx::writeFormula(wb,
+                       sheet = "Expected.Returns",
+                       x = paste0(int2col(nominalReturnCol+as.numeric(ret.rng.index["left"])-1),
+                                  ret.rng.index["top"] + muniRow, "+", 
+                                  int2col(growthCol+as.numeric(ret.rng.index["left"])-1),
+                                  ret.rng.index["top"] + muniRow),
+                       startCol = ret.rng.index["left"] + realReturnCol - 1,
+                       startRow = ret.rng.index["top"] + muniRow)
+# muni yield
+openxlsx::writeFormula(wb,
+                       sheet = "Expected.Returns",
+                       x = paste0(int2col(realReturnCol+as.numeric(ret.rng.index["left"])-1),
+                                  ret.rng.index["top"] + muniRow, "-", 
+                                  int2col(growthCol+as.numeric(ret.rng.index["left"])-1),
+                                  ret.rng.index["top"] + muniRow, "-",
+                                  int2col(valuationChangeCol+as.numeric(ret.rng.index["left"])-1),
+                                  ret.rng.index["top"] + muniRow),
+                       startCol = ret.rng.index["left"] + yieldCol - 1,
+                       startRow = ret.rng.index["top"] + muniRow)
+openxlsx::writeData(wb,
+                    sheet = "Expected.Returns",
+                    x = rafi$as_of_date,
+                    startCol = date.rng.index["left"],
+                    startRow = date.rng.index["top"],
+                    colNames = FALSE, rowNames = FALSE)
+openxlsx::writeData(wb,
+                    sheet = "Expected.Returns",
+                    x = "As of Date:",
+                    startCol = date.rng.index["left"] - 1,
+                    startRow = date.rng.index["top"],
+                    colNames = FALSE, rowNames = FALSE)
+
+openxlsx::addWorksheet(wb, "Expected.Risk.Matrix")
+openxlsx::writeDataTable(wb, 
+          sheet = "Expected.Risk.Matrix",
+          x = out.cor,
+          startCol = cor.rng.index["left"] - 1,
+          startRow = cor.rng.index["top"],
+          colNames = TRUE, rowNames = FALSE,
+          withFilter = FALSE)
+openxlsx::writeDataTable(wb, 
+          sheet = "Expected.Risk.Matrix",
+          x=out.cov,
+          startCol = cov.rng.index["left"]-1,
+          startRow = cov.rng.index["top"],
+          colNames = TRUE, rowNames = FALSE,
+          withFilter = FALSE)
+openxlsx::saveWorkbook(wb, file=paste0(rafi.data.loc,fn), overwrite = TRUE)
+```
+
+The "as of" date of the file from Research Affiliates is `r rafi$as_of_date`.
