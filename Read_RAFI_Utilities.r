@@ -248,8 +248,95 @@ readReturnData <- function(fn, vecSheetNames = c("Expected.Returns", "Expected R
   return(out)
 }
 
+#' Write Modified RAFI data to an Excel File
+#' 
+#' This writes four items: the As of Date; data frames of Returns, 
+#' Correlations and Covariances to a file.   This function is designed to be
+#' called after adjustments are made to the original RAFI data - generally 
+#' after adding additional classes such as Munis.  While we use RAFI now, this
+#' modified data becomes our capital market assumptions.
+#'
+#' @param modRAFI List with AsOfDate, Ret, Corr, Cov 
+#' @param fn Optional. Suggested  rafi.data.loc / RAFI YYYYMM w Muni.xlsx
+#'
+#' @return if TRUE, returns TRUE in case of a success, else FALSE.
+#' @export
+writeModifiedRAFIFile <- function(modRAFI, fn = paste0("RAFI ", 
+                                               format(as.Date(rafidate, "%B,%d,%Y"), format = "%Y%m"), 
+                                               " w Muni.xlsx")) {
+  rafidate <- sub(", " , ", 1, ", modRAFI$AsOfDate)
+  muniRow <- which(modRAFI$Ret$`Asset Class` == "Munis")
+  growthCol <- which(grepl("Growth", names(modRAFI$Ret), fixed = TRUE)) 
+  yieldCol <- which(grepl("Yield", names(modRAFI$Ret), fixed = TRUE)) 
+  valuationChangeCol <-  which(grepl("Valuation", names(modRAFI$Ret), fixed = TRUE))
+  realReturnCol <-  which(grepl("Real", names(modRAFI$Ret), fixed = TRUE))
+  nominalReturnCol <- which(grepl("Nominal", names(modRAFI$Ret), fixed = TRUE))
+  fn <- paste0("RAFI ", 
+               format(as.Date(rafidate, "%B,%d,%Y"), format = "%Y%m"), 
+               " w Muni.xlsx")
+  xlranges <- getxlranges()
+  cor.rng.index <- excel.link::xl.address2index(xlranges$rng.corr)
+  cov.rng.index <- excel.link::xl.address2index(xlranges$rng.cov)
+  ret.rng.index <- excel.link::xl.address2index(xlranges$rng.return)
+  date.rng.index <- excel.link::xl.address2index(xlranges$rng.date)
+  options("openxlsx.numFmt" = "0.0%")
+  wb <- openxlsx::createWorkbook()
+  openxlsx::addWorksheet(wb, "Expected.Returns")
+  openxlsx::writeDataTable(wb,
+                           sheet = "Expected.Returns",
+                           x = modRAFI$Ret,
+                           startCol = ret.rng.index["left"],
+                           startRow = ret.rng.index["top"],
+                           colNames = TRUE,
+                           rowNames = FALSE,
+                           withFilter = FALSE)
+  # muni expected return real
+  openxlsx::writeFormula(wb,
+                         sheet = "Expected.Returns",
+                         x = paste0(int2col(nominalReturnCol+as.numeric(ret.rng.index["left"])-1),
+                                    ret.rng.index["top"] + muniRow, "+", 
+                                    int2col(growthCol+as.numeric(ret.rng.index["left"])-1),
+                                    ret.rng.index["top"] + muniRow),
+                         startCol = ret.rng.index["left"] + realReturnCol - 1,
+                         startRow = ret.rng.index["top"] + muniRow)
+  # muni yield
+  openxlsx::writeFormula(wb,
+                         sheet = "Expected.Returns",
+                         x = paste0(int2col(realReturnCol+as.numeric(ret.rng.index["left"])-1),
+                                    ret.rng.index["top"] + muniRow, "-", 
+                                    int2col(growthCol+as.numeric(ret.rng.index["left"])-1),
+                                    ret.rng.index["top"] + muniRow, "-",
+                                    int2col(valuationChangeCol+as.numeric(ret.rng.index["left"])-1),
+                                    ret.rng.index["top"] + muniRow),
+                         startCol = ret.rng.index["left"] + yieldCol - 1,
+                         startRow = ret.rng.index["top"] + muniRow)
+  openxlsx::writeData(wb,
+                      sheet = "Expected.Returns",
+                      x = modRAFI$AsOfDate,
+                      startCol = date.rng.index["left"],
+                      startRow = date.rng.index["top"],
+                      colNames = FALSE, rowNames = FALSE)
+  openxlsx::writeData(wb,
+                      sheet = "Expected.Returns",
+                      x = "As of Date:",
+                      startCol = date.rng.index["left"] - 1,
+                      startRow = date.rng.index["top"],
+                      colNames = FALSE, rowNames = FALSE)
   
-# todo. Fix massageRafi.  Probably in make class names
-# after massageRafi there are duplicate asset class names in the corr item
-# US Treasury Intermediate is renamed US Aggregate
-
+  openxlsx::addWorksheet(wb, "Expected.Risk.Matrix")
+  openxlsx::writeDataTable(wb, 
+                           sheet = "Expected.Risk.Matrix",
+                           x = modRAFI$Corr,
+                           startCol = cor.rng.index["left"] - 1,
+                           startRow = cor.rng.index["top"],
+                           colNames = TRUE, rowNames = FALSE,
+                           withFilter = FALSE)
+  openxlsx::writeDataTable(wb, 
+                           sheet = "Expected.Risk.Matrix",
+                           x=modRAFI$Cov,
+                           startCol = cov.rng.index["left"]-1,
+                           startRow = cov.rng.index["top"],
+                           colNames = TRUE, rowNames = FALSE,
+                           withFilter = FALSE)
+  openxlsx::saveWorkbook(wb, file = fn, overwrite = TRUE)
+}

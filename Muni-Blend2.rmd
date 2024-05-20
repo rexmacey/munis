@@ -49,7 +49,6 @@ riskSheetNames <- c("Expected.Risk.Matrix", "Expected Correlations") # sheet nam
 fnRAFI <- paste0(rafi.data.loc, xls.file)
 rafi <- rafi.read.xls.v4(fnRAFI, erSheetNames, riskSheetNames)
 rafi <- massageRafi(rafi = rafi, colNamesMap = colNamesMap, classNamesMap = classNamesMap)
-rafibk <- rafi
 # Should Asset Class be renames Segment?
 if (nrow(rafi$corr)  != (ncol(rafi$corr) - 1)) {
   stop("Correlation matrix not square.")
@@ -64,26 +63,6 @@ if (nrow(rafi$ret) != nrow(rafi$corr)) {
   stop("Return and Risk matrices have different asset classes after filtering.")
 }
 
-
-# lookup[is.na(lookup$Ticker), "Ticker"] <- "NA"
-# for (i in 1:nrow(lookup)) {
-#     ticker <- lookup$Ticker[i]
-#     if (ticker != "NA") {
-#         temp <- NULL
-#         attempt <- 0
-#         while (is.null(temp) && attempt <= 5) {
-#             attempt <- attempt + 1
-#             try(
-#                 temp <- scrapeQuoteSummary(ticker)
-#             )
-#         }
-#         if (is.null(temp)) {
-#             warning(paste("ScrapeQuoteSummary failed for",ticker))
-#         } else {
-#             lookup$Name[i] <- temp['Fund Name']    
-#         }
-#     }
-# }
 
 freq <- "W"
 retToBlend <- GetReturns(tickersToBlend, freq)
@@ -330,9 +309,20 @@ out.ret[muniRow, growthCol] <- out.ret[usaggRow, growthCol]
 out.ret[muniRow, valuationChangeCol] <- out.ret[usaggRow, valuationChangeCol]
 ```
 
-
 ```{r}
+modRAFI <- list(AsOfDate = rafi$as_of_date,
+                Ret = out.ret,
+                Corr = out.cor,
+                Cov = out.cov)
+rafidate <- sub(", " , ", 1, ",rafi$as_of_date)
+fn <- paste0(rafi.data.loc, "RAFI ", 
+             format(as.Date(rafidate, "%B,%d,%Y"), format = "%Y%m"), 
+             " w Muni.xlsx")
+writeModifiedRAFIFile(modRAFI, fn)
+```
 
+```{r include=FALSE}
+print("THIS SHOULDN'T PRINT")
 
 rafidate <- sub(", " , ", 1, ",rafi$as_of_date)
 fn <- paste0("RAFI ", 
